@@ -17,21 +17,37 @@ public class ProjectService : IProjectService
 
     public async Task<Guid> CreateProposalAsync(ProjectProposalDto dto)
     {
+        if (string.IsNullOrWhiteSpace(dto.Title))
+            throw new BusinessException("El título es obligatorio.");
+        if (string.IsNullOrWhiteSpace(dto.Description))
+            throw new BusinessException("La descripción es obligatoria.");
+        if (dto.Amount <= 0)
+            throw new BusinessException("El monto debe ser mayor a cero.");
+        if (dto.Duration <= 0)
+            throw new BusinessException("La duración debe ser mayor a cero.");
+        if (!await _context.Areas.AnyAsync(a => a.Id == dto.Area))
+            throw new BusinessException("Área inválida.");
+        if (!await _context.ProjectTypes.AnyAsync(t => t.Id == dto.Type))
+            throw new BusinessException("Tipo de proyecto inválido.");
+        if (!await _context.Users.AnyAsync(u => u.Id == dto.User))
+            throw new BusinessException("Usuario inválido.");
         if (await _context.ProjectProposals.AnyAsync(p => p.Title == dto.Title))
-            throw new InvalidOperationException("Ya existe un proyecto con ese título.");
+            throw new BusinessException("Ya existe un proyecto con ese título.");
+
+        var initialStatus = await _context.ApprovalStatuses.FirstAsync();
 
         var proposal = new ProjectProposal
         {
             Id = Guid.NewGuid(),
             Title = dto.Title,
             Description = dto.Description,
-            AreaId = dto.AreaId,
-            TypeId = dto.TypeId,
-            EstimatedAmount = dto.EstimatedAmount,
-            EstimatedDuration = dto.EstimatedDuration,
-            StatusId = 1,
+            AreaId = dto.Area,
+            TypeId = dto.Type,
+            EstimatedAmount = dto.Amount,
+            EstimatedDuration = dto.Duration,
+            StatusId = initialStatus.Id,
             CreateAt = DateTime.UtcNow,
-            CreateById = dto.CreateById
+            CreateById = dto.User
         };
 
         _context.ProjectProposals.Add(proposal);
@@ -103,7 +119,7 @@ public class ProjectService : IProjectService
         return await query.ToListAsync();
     }
 
-    public async Task<bool> UpdateProposalAsync(Guid id, ProjectProposalDto dto)
+    public async Task<bool> UpdateProposalAsync(Guid id, ProjectProposalUpdateDto dto)
     {
         var proposal = await _context.ProjectProposals.FindAsync(id);
 
@@ -113,12 +129,12 @@ public class ProjectService : IProjectService
         if (proposal.StatusId != 4)
             throw new BusinessException("Solo se pueden editar propuestas con estado 'Observed'.");
 
+        if (await _context.ProjectProposals.AnyAsync(p => p.Title == dto.Title && p.Id != id))
+            throw new BusinessException("Ya existe un proyecto con ese título.");
+
         proposal.Title = dto.Title;
         proposal.Description = dto.Description;
-        proposal.AreaId = dto.AreaId;
-        proposal.TypeId = dto.TypeId;
-        proposal.EstimatedAmount = dto.EstimatedAmount;
-        proposal.EstimatedDuration = dto.EstimatedDuration;
+        proposal.EstimatedDuration = dto.Duration;
 
         proposal.StatusId = 1;
 
@@ -137,58 +153,103 @@ public class ProjectService : IProjectService
         if (proposal == null)
             throw new NotFoundException("Proyecto no encontrado.");
 
-        if (steps.All(s => s.StatusId == 2))
-            proposal.StatusId = 2;
-        else if (steps.Any(s => s.StatusId == 3))
+        if (steps.Any(s => s.StatusId == 3))
+        {
             proposal.StatusId = 3;
+        }
         else if (steps.Any(s => s.StatusId == 4))
+        {
             proposal.StatusId = 4;
+        }
+        else if (steps.All(s => s.StatusId == 2))
+        {
+            proposal.StatusId = 2;
+        }
         else
+        {
             proposal.StatusId = 1;
+        }
 
         await _context.SaveChangesAsync();
     }
 
 
-    public async Task<bool> ApproveAsync(Guid projectId, int approverUserId)
+    public async Task<bool> ApproveAsync(Guid projectId, int stepId, int approverUserId)
     {
         var step = await _context.ProjectApprovalSteps
-            .FirstOrDefaultAsync(s => s.ProjectProposalId == projectId && s.ApproverUserId == approverUserId);
+            .FirstOrDefaultAsync(s => s.Id == stepId && s.ProjectProposalId == projectId);
 
-        if (step == null || (step.StatusId != 1 && step.StatusId != 4))
+        if (step == null)
+            return false;
+
+        if (step.StatusId != 1 && step.StatusId != 4)
+            return false;
+
+        var user = await _context.Users.Include(u => u.Role).FirstOrDefaultAsync(u => u.Id == approverUserId);
+        if (user == null || user.RoleId != step.ApproverRoleId)
+            return false;
+
+        var previousSteps = await _context.ProjectApprovalSteps
+            .Where(s => s.ProjectProposalId == projectId && s.StepOrder < step.StepOrder)
+            .ToListAsync();
+
+        if (previousSteps.Any(s => s.StatusId == 1))
             return false;
 
         step.StatusId = 2;
+        step.ApproverUserId = approverUserId;
+        step.DecisionDate = DateTime.UtcNow;
+
         await UpdateProposalStatusAsync(projectId);
         await _context.SaveChangesAsync();
         return true;
     }
 
-    public async Task<bool> ObserveAsync(Guid projectId, int approverUserId, string observation)
+    public async Task<bool> ObserveAsync(Guid projectId, int stepId, int approverUserId, string observation)
     {
         var step = await _context.ProjectApprovalSteps
-            .FirstOrDefaultAsync(s => s.ProjectProposalId == projectId && s.ApproverUserId == approverUserId);
+            .FirstOrDefaultAsync(s => s.Id == stepId && s.ProjectProposalId == projectId);
 
         if (step == null)
+            return false;
+
+        if (step.StatusId == 2 || step.StatusId == 3)
+            return false;
+
+        var user = await _context.Users.Include(u => u.Role).FirstOrDefaultAsync(u => u.Id == approverUserId);
+        if (user == null || user.RoleId != step.ApproverRoleId)
             return false;
 
         step.StatusId = 4;
+        step.ApproverUserId = approverUserId;
         step.Observations = observation;
+        step.DecisionDate = DateTime.UtcNow;
+
         await _context.SaveChangesAsync();
         await UpdateProposalStatusAsync(projectId);
         await _context.SaveChangesAsync();
         return true;
     }
 
-    public async Task<bool> RejectAsync(Guid projectId, int approverUserId)
+    public async Task<bool> RejectAsync(Guid projectId, int stepId, int approverUserId)
     {
         var step = await _context.ProjectApprovalSteps
-            .FirstOrDefaultAsync(s => s.ProjectProposalId == projectId && s.ApproverUserId == approverUserId);
+            .FirstOrDefaultAsync(s => s.Id == stepId && s.ProjectProposalId == projectId);
 
         if (step == null)
             return false;
 
+        if (step.StatusId == 2 || step.StatusId == 3)
+            return false;
+
+        var user = await _context.Users.Include(u => u.Role).FirstOrDefaultAsync(u => u.Id == approverUserId);
+        if (user == null || user.RoleId != step.ApproverRoleId)
+            return false;
+
         step.StatusId = 3;
+        step.ApproverUserId = approverUserId;
+        step.DecisionDate = DateTime.UtcNow;
+
         await UpdateProposalStatusAsync(projectId);
         await _context.SaveChangesAsync();
         return true;
@@ -231,11 +292,7 @@ public class ProjectService : IProjectService
         return projects.Select(p => new ProjectListItemDto
         {
             Id = p.Id,
-            Title = p.Title,
-            StatusId = p.StatusId,
-            StatusName = p.Status != null ? p.Status.Name : string.Empty,
-            CreatedAt = p.CreateAt,
-            ApplicantUserName = p.CreateBy != null ? p.CreateBy.Name : string.Empty
+            Title = p.Title
         });
     }
 
@@ -272,6 +329,7 @@ public class ProjectService : IProjectService
             .Include(p => p.Type)
             .Include(p => p.Status)
             .Include(p => p.CreateBy)
+                .ThenInclude(u => u.Role)
             .Include(p => p.ApprovalSteps)
                 .ThenInclude(s => s.ApproverRole)
             .Include(p => p.ApprovalSteps)
@@ -288,7 +346,7 @@ public class ProjectService : IProjectService
         {
             Id = proposal.Id,
             Title = proposal.Title,
-            Description = proposal.Description,
+            Description = string.IsNullOrEmpty(proposal.Description) ? "Sin descripción" : proposal.Description,
             Amount = proposal.EstimatedAmount,
             Duration = proposal.EstimatedDuration,
             Area = new AreaDto
@@ -296,71 +354,90 @@ public class ProjectService : IProjectService
                 Id = proposal.Area.Id,
                 Name = proposal.Area.Name
             },
-            ProjectType = new ProjectTypeDto
-            {
-                Id = proposal.Type.Id,
-                Name = proposal.Type.Name
-            },
             Status = new ApprovalStatusDto
             {
                 Id = proposal.Status.Id,
                 Name = proposal.Status.Name
             },
-            Steps = proposal.ApprovalSteps.Select(step => new ApprovalStepDetailsDto
+            Type = new ProjectTypeDto
             {
-                Id = step.Id,
-                StepOrder = step.StepOrder,
-                DecisionDate = step.DecisionDate,
-                Observations = step.Observations,
-                ApproverRole = new RoleDto
+                Id = proposal.Type.Id,
+                Name = proposal.Type.Name
+            },
+            User = new UserDto
+            {
+                Id = proposal.CreateBy.Id,
+                Name = proposal.CreateBy.Name,
+                Email = proposal.CreateBy.Email,
+                Role = new RoleDto
                 {
-                    Id = step.ApproverRole.Id,
-                    Name = step.ApproverRole.Name
-                },
-                Status = new ApprovalStatusDto
-                {
-                    Id = step.Status.Id,
-                    Name = step.Status.Name
-                },
-                ApproverUser = step.ApproverUser == null ? null : new UserDto
-                {
-                    Id = step.ApproverUser.Id,
-                    Name = step.ApproverUser.Name,
-                    Email = step.ApproverUser.Email,
-                    Role = new RoleDto
-                    {
-                        Id = step.ApproverUser.Role.Id,
-                        Name = step.ApproverUser.Role.Name
-                    }
+                    Id = proposal.CreateBy.Role?.Id ?? 0,
+                    Name = proposal.CreateBy.Role?.Name ?? "Sin Rol"
                 }
-            }).ToList()
+            },
+            Steps = proposal.ApprovalSteps
+                .OrderBy(s => s.StepOrder)
+                .Select(step => new ApprovalStepDetailsDto
+                {
+                    Id = step.Id,
+                    StepOrder = step.StepOrder,
+                    DecisionDate = step.DecisionDate,
+                    Observations = step.Observations,
+                    // ✅ ORDEN CORRECTO: ApproverUser PRIMERO
+                    ApproverUser = step.ApproverUser == null ? null : new UserDto
+                    {
+                        Id = step.ApproverUser.Id,
+                        Name = step.ApproverUser.Name,
+                        Email = step.ApproverUser.Email,
+                        Role = new RoleDto
+                        {
+                            Id = step.ApproverUser.Role?.Id ?? 0,
+                            Name = step.ApproverUser.Role?.Name ?? "Sin Rol"
+                        }
+                    },
+                    ApproverRole = new RoleDto
+                    {
+                        Id = step.ApproverRole.Id,
+                        Name = step.ApproverRole.Name
+                    },
+                    Status = new ApprovalStatusDto
+                    {
+                        Id = step.Status.Id,
+                        Name = step.Status.Name
+                    }
+                }).ToList()
         };
 
         return dto;
     }
 
 
-
-    public async Task<IEnumerable<ProjectListItemDto>> GetAllAsync(string? title = null, int? statusId = null, int? createdById = null, int? approverUserId = null)
+    public async Task<IEnumerable<ProjectListItemDto>> GetAllAsync(string? title = null, string? status = null, string? applicant = null, string? approvalUser = null)
     {
+        int? statusParsed = string.IsNullOrEmpty(status) ? null : int.Parse(status);
+        int? applicantParsed = string.IsNullOrEmpty(applicant) ? null : int.Parse(applicant);
+        int? approvalUserParsed = string.IsNullOrEmpty(approvalUser) ? null : int.Parse(approvalUser);
+
         var query = _context.ProjectProposals
             .Include(p => p.CreateBy)
             .Include(p => p.Status)
+            .Include(p => p.Area)
+            .Include(p => p.Type)
             .AsQueryable();
 
         if (!string.IsNullOrEmpty(title))
             query = query.Where(p => p.Title.Contains(title));
 
-        if (statusId.HasValue)
-            query = query.Where(p => p.StatusId == statusId.Value);
+        if (statusParsed.HasValue)
+            query = query.Where(p => p.StatusId == statusParsed.Value);
 
-        if (createdById.HasValue)
-            query = query.Where(p => p.CreateById == createdById.Value);
+        if (applicantParsed.HasValue)
+            query = query.Where(p => p.CreateById == applicantParsed.Value);
 
-        if (approverUserId.HasValue)
+        if (approvalUserParsed.HasValue)
             query = query.Where(p =>
-                p.ApprovalSteps.Any(s => s.ApproverUserId == approverUserId.Value) &&
-                p.CreateById != approverUserId.Value);
+                p.ApprovalSteps.Any(s => s.ApproverUserId == approvalUserParsed.Value) &&
+                p.CreateById != approvalUserParsed.Value);
 
         var projects = await query
             .Select(p => new ProjectListItemDto
@@ -372,14 +449,9 @@ public class ProjectService : IProjectService
                 Duration = p.EstimatedDuration,
                 Area = p.Area != null ? p.Area.Name : string.Empty,
                 Status = p.Status != null ? p.Status.Name : string.Empty,
-                Type = p.Type != null ? p.Type.Name : string.Empty,
-                CreatedAt = p.CreateAt,
-                ApplicantUserName = p.CreateBy != null ? p.CreateBy.Name : string.Empty,
-                ApplicantUserId = p.CreateById,
-                StatusId = p.StatusId
+                Type = p.Type != null ? p.Type.Name : string.Empty
             })
             .ToListAsync();
-
 
         return projects;
     }
@@ -478,6 +550,5 @@ public class ProjectService : IProjectService
             })
             .ToListAsync();
     }
-
 
 }

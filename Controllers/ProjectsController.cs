@@ -4,6 +4,7 @@ using ProjectApprovalAPI.Services.Interfaces;
 using System;
 using System.Threading.Tasks;
 using ProjectApprovalAPI.Enums;
+using ProjectApprovalAPI.Exceptions;
 
 namespace ProjectApprovalAPI.Controllers
 {
@@ -51,72 +52,149 @@ namespace ProjectApprovalAPI.Controllers
         [Tags("Proyectos")]
         public async Task<IActionResult> Create([FromBody] ProjectProposalDto dto)
         {
-            var newId = await _projectService.CreateProposalAsync(dto);
-            return CreatedAtAction(nameof(GetById), new { id = newId }, newId);
+            try
+            {
+                var newId = await _projectService.CreateProposalAsync(dto);
+
+                var createdProject = await _projectService.GetByIdAsync(newId);
+
+                return StatusCode(201, createdProject);
+            }
+            catch (Exception ex)
+            {
+                throw;
+            }
         }
 
         [HttpGet("/Api/Project")]
         [Tags("Proyectos")]
-        public async Task<IActionResult> GetAll([FromQuery] string? title, [FromQuery] int? statusId, [FromQuery] int? createdById, [FromQuery] int? approverUserId)
+        public async Task<IActionResult> GetAll([FromQuery] string? title, [FromQuery] string? status, [FromQuery] string? applicant, [FromQuery] string? approvalUser)
         {
-            var result = await _projectService.GetAllAsync(title, statusId, createdById, approverUserId);
-            return Ok(result);
+            try
+            {
+                if (!string.IsNullOrEmpty(status) && !int.TryParse(status, out _))
+                {
+                    return BadRequest(new { message = "El parámetro status debe ser un número válido." });
+                }
+
+                if (!string.IsNullOrEmpty(applicant) && !int.TryParse(applicant, out _))
+                {
+                    return BadRequest(new { message = "El parámetro applicant debe ser un número válido." });
+                }
+
+                if (!string.IsNullOrEmpty(approvalUser) && !int.TryParse(approvalUser, out _))
+                {
+                    return BadRequest(new { message = "El parámetro approvalUser debe ser un número válido." });
+                }
+
+                var result = await _projectService.GetAllAsync(title, status, applicant, approvalUser);
+                return Ok(result);
+            }
+            catch (BusinessException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
         }
 
-        [HttpGet("/Api/Project/{id:guid}")]
+
+        [HttpGet("/Api/Project/{id}")]
         [Tags("Proyectos")]
-        public async Task<IActionResult> GetById(Guid id)
+        public async Task<IActionResult> GetById(string id)
         {
-            var proposal = await _projectService.GetByIdAsync(id);
-            if (proposal == null) return NotFound();
+            if (!Guid.TryParse(id, out var guidId))
+            {
+                return BadRequest(new { message = "El ID debe ser un GUID válido." });
+            }
+
+            var proposal = await _projectService.GetByIdAsync(guidId);
+            if (proposal == null)
+                return NotFound(new { message = "Proyecto no encontrado." });
+
             return Ok(proposal);
         }
 
-        [HttpPut("/Api/Project/{id:guid}")]
+        [HttpPatch("/Api/Project/{id}")]
         [Tags("Proyectos")]
-        public async Task<IActionResult> Update(Guid id, [FromBody] ProjectProposalDto dto)
+        public async Task<IActionResult> Update(string id, [FromBody] ProjectProposalUpdateDto dto)
         {
-            var updated = await _projectService.UpdateProposalAsync(id, dto);
-            if (!updated) return NotFound();
-            return NoContent();
+            try
+            {
+                if (!Guid.TryParse(id, out var guidId))
+                {
+                    return BadRequest(new { message = "El ID debe ser un GUID válido." });
+                }
+
+                if (string.IsNullOrWhiteSpace(dto.Title))
+                    return BadRequest(new { message = "El título es obligatorio." });
+
+                if (string.IsNullOrWhiteSpace(dto.Description))
+                    return BadRequest(new { message = "La descripción es obligatoria." });
+
+                if (dto.Duration <= 0)
+                    return BadRequest(new { message = "La duración debe ser mayor a cero." });
+
+                await _projectService.UpdateProposalAsync(guidId, dto);
+
+                var updatedProject = await _projectService.GetByIdAsync(guidId);
+                return Ok(updatedProject);
+            }
+            catch (BusinessException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (NotFoundException ex)
+            {
+                return NotFound(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error interno del servidor." });
+            }
         }
 
-        [HttpPost("Project/{id:guid}/Decision")]
+        [HttpPatch("Project/{id:guid}/decision")]
         [Tags("Proyectos")]
         public async Task<IActionResult> Decision(Guid id, [FromBody] DecisionDto dto)
         {
-            if (!Enum.IsDefined(typeof(DecisionType), dto.Status))
-                return BadRequest("Estado inválido.");
-
-            var decision = (DecisionType)dto.Status;
-
-            bool success = decision switch
+            try
             {
-                DecisionType.Approve => await _projectService.ApproveAsync(id, dto.ApproverUserId),
-                DecisionType.Observe => await _projectService.ObserveAsync(id, dto.ApproverUserId, dto.Observation ?? ""),
-                DecisionType.Reject => await _projectService.RejectAsync(id, dto.ApproverUserId),
-                _ => false
-            };
+                if (dto.Id == 0)
+                    return BadRequest(new { message = "El ID del paso es obligatorio." });
 
-            if (!success) return BadRequest("No se pudo completar la acción.");
-            return NoContent();
+                if (dto.Status == 0)
+                    return BadRequest(new { message = "El status es obligatorio." });
+
+                if (dto.User == 0)
+                    return BadRequest(new { message = "El usuario es obligatorio." });
+
+                if (!Enum.IsDefined(typeof(DecisionType), dto.Status))
+                    return BadRequest(new { message = "Estado inválido." });
+
+                var decision = (DecisionType)dto.Status;
+
+                bool success = decision switch
+                {
+                    DecisionType.Approve => await _projectService.ApproveAsync(id, dto.Id, dto.User),
+                    DecisionType.Observe => await _projectService.ObserveAsync(id, dto.Id, dto.User, dto.Observation ?? ""),
+                    DecisionType.Reject => await _projectService.RejectAsync(id, dto.Id, dto.User),
+                    _ => false
+                };
+
+                if (!success)
+                    return BadRequest(new { message = "No se pudo completar la acción." });
+
+                var updatedProject = await _projectService.GetByIdAsync(id);
+                return Ok(updatedProject);
+            }
+            catch (BusinessException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error interno del servidor." });
+            }
         }
-
-
-        [HttpGet("Project/Options")]
-        [Tags("Proyectos")]
-        public async Task<IActionResult> GetCreationOptions() =>
-            Ok(await _projectService.GetProjectOptionsAsync());
-
-        [HttpGet("Project/{id:guid}/Options")]
-        [Tags("Proyectos")]
-        public async Task<IActionResult> GetEditOptions(Guid id) =>
-            Ok(await _projectService.GetEditProjectOptionsAsync(id));
-
-        [HttpGet("Project/{id:guid}/Decision-Options")]
-        [Tags("Proyectos")]
-        public async Task<IActionResult> GetDecisionOptions(Guid id) =>
-            Ok(await _projectService.GetDecisionOptionsAsync(id));
     }
 
 }

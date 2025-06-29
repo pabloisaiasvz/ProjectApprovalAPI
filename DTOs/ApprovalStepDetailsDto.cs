@@ -8,8 +8,8 @@ namespace ProjectApprovalAPI.DTOs
         public int StepOrder { get; set; }
         public DateTime? DecisionDate { get; set; }
         public string? Observations { get; set; }
-        public RoleDto ApproverRole { get; set; }
-        public ApprovalStatusDto Status { get; set; }
         public UserDto? ApproverUser { get; set; }
+        public RoleDto ApproverRole { get; set; }  
+        public ApprovalStatusDto Status { get; set; }
     }
 }

@@ -2,6 +2,7 @@
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using ProjectApprovalAPI.Exceptions;
 
 namespace ProjectApprovalAPI.Common
 {
@@ -45,6 +46,10 @@ namespace ProjectApprovalAPI.Common
 
                 case ArgumentNullException:
                 case ArgumentException:
+                    statusCode = StatusCodes.Status400BadRequest;
+                    message = exception.Message;
+                    break;
+                case BusinessException:
                     statusCode = StatusCodes.Status400BadRequest;
                     message = exception.Message;
                     break;

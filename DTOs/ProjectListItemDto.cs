@@ -12,11 +12,6 @@
             public string Area { get; set; }
             public string Status { get; set; }
             public string Type { get; set; }
-            public DateTime CreatedAt { get; set; }
-            public string ApplicantUserName { get; set; }
-            public int ApplicantUserId { get; set; }
-            public int StatusId { get; set; }
-            public string StatusName { get; set; }
         }
 
     }
