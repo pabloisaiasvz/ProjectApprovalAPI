@@ -1,10 +1,8 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using ProjectApprovalAPI.DTOs;
-using ProjectApprovalAPI.Services.Interfaces;
-using System;
-using System.Threading.Tasks;
-using ProjectApprovalAPI.Enums;
-using ProjectApprovalAPI.Exceptions;
+using Application.Interfaces.Services;
+using Application.DTOs;
+using Domain.ValueObjects;
+using Domain.Exceptions;
 
 namespace ProjectApprovalAPI.Controllers
 {
@@ -12,41 +10,55 @@ namespace ProjectApprovalAPI.Controllers
     [Route("Api")]
     public class ProjectController : ControllerBase
     {
-        private readonly IProjectService _projectService;
+        private readonly IProjectManagementService _managementService;
+        private readonly IProjectApprovalService _approvalService;
+        private readonly IProjectQueryService _queryService;
+        private readonly IMasterDataService _masterDataService;
 
-        public ProjectController(IProjectService projectService)
+        public ProjectController(
+            IProjectManagementService managementService,
+            IProjectApprovalService approvalService,
+            IProjectQueryService queryService,
+            IMasterDataService masterDataService)
         {
-            _projectService = projectService;
+            _managementService = managementService;
+            _approvalService = approvalService;
+            _queryService = queryService;
+            _masterDataService = masterDataService;
         }
 
+        // ============================================
         // ----------- Información -----------
+        // ============================================
 
         [HttpGet("Area")]
         [Tags("Información")]
         public async Task<IActionResult> GetAreas() =>
-            Ok(await _projectService.GetAreasAsync());
+            Ok(await _masterDataService.GetAreasAsync());
 
         [HttpGet("ProjectType")]
         [Tags("Información")]
         public async Task<IActionResult> GetProjectTypes() =>
-            Ok(await _projectService.GetProjectTypesAsync());
+            Ok(await _masterDataService.GetProjectTypesAsync());
 
         [HttpGet("Role")]
         [Tags("Información")]
         public async Task<IActionResult> GetRoles() =>
-            Ok(await _projectService.GetRolesAsync());
+            Ok(await _masterDataService.GetRolesAsync());
 
         [HttpGet("ApprovalStatus")]
         [Tags("Información")]
         public async Task<IActionResult> GetApprovalStatuses() =>
-            Ok(await _projectService.GetApprovalStatusesAsync());
+            Ok(await _masterDataService.GetApprovalStatusesAsync());
 
         [HttpGet("User")]
         [Tags("Información")]
         public async Task<IActionResult> GetUsers() =>
-            Ok(await _projectService.GetUsersAsync());
+            Ok(await _masterDataService.GetUsersAsync());
 
+        // ============================================
         // ----------- Proyectos -----------
+        // ============================================
 
         [HttpPost("/Api/Project")]
         [Tags("Proyectos")]
@@ -54,10 +66,8 @@ namespace ProjectApprovalAPI.Controllers
         {
             try
             {
-                var newId = await _projectService.CreateProposalAsync(dto);
-
-                var createdProject = await _projectService.GetByIdAsync(newId);
-
+                var newId = await _managementService.CreateProposalAsync(dto);
+                var createdProject = await _queryService.GetByIdAsync(newId);
                 return StatusCode(201, createdProject);
             }
             catch (Exception ex)
@@ -87,7 +97,7 @@ namespace ProjectApprovalAPI.Controllers
                     return BadRequest(new { message = "El parámetro approvalUser debe ser un número válido." });
                 }
 
-                var result = await _projectService.GetAllAsync(title, status, applicant, approvalUser);
+                var result = await _queryService.GetAllAsync(title, status, applicant, approvalUser);
                 return Ok(result);
             }
             catch (BusinessException ex)
@@ -95,7 +105,6 @@ namespace ProjectApprovalAPI.Controllers
                 return BadRequest(new { message = ex.Message });
             }
         }
-
 
         [HttpGet("/Api/Project/{id}")]
         [Tags("Proyectos")]
@@ -106,7 +115,7 @@ namespace ProjectApprovalAPI.Controllers
                 return BadRequest(new { message = "El ID debe ser un GUID válido." });
             }
 
-            var proposal = await _projectService.GetByIdAsync(guidId);
+            var proposal = await _queryService.GetByIdAsync(guidId);
             if (proposal == null)
                 return NotFound(new { message = "Proyecto no encontrado." });
 
@@ -133,9 +142,9 @@ namespace ProjectApprovalAPI.Controllers
                 if (dto.Duration <= 0)
                     return BadRequest(new { message = "La duración debe ser mayor a cero." });
 
-                await _projectService.UpdateProposalAsync(guidId, dto);
+                await _managementService.UpdateProposalAsync(guidId, dto);
 
-                var updatedProject = await _projectService.GetByIdAsync(guidId);
+                var updatedProject = await _queryService.GetByIdAsync(guidId);
                 return Ok(updatedProject);
             }
             catch (BusinessException ex)
@@ -174,16 +183,16 @@ namespace ProjectApprovalAPI.Controllers
 
                 bool success = decision switch
                 {
-                    DecisionType.Approve => await _projectService.ApproveAsync(id, dto.Id, dto.User),
-                    DecisionType.Observe => await _projectService.ObserveAsync(id, dto.Id, dto.User, dto.Observation ?? ""),
-                    DecisionType.Reject => await _projectService.RejectAsync(id, dto.Id, dto.User),
+                    DecisionType.Approve => await _approvalService.ApproveAsync(id, dto.Id, dto.User),
+                    DecisionType.Observe => await _approvalService.ObserveAsync(id, dto.Id, dto.User, dto.Observation ?? ""),
+                    DecisionType.Reject => await _approvalService.RejectAsync(id, dto.Id, dto.User),
                     _ => false
                 };
 
                 if (!success)
                     return BadRequest(new { message = "No se pudo completar la acción." });
 
-                var updatedProject = await _projectService.GetByIdAsync(id);
+                var updatedProject = await _queryService.GetByIdAsync(id);
                 return Ok(updatedProject);
             }
             catch (BusinessException ex)
@@ -196,5 +205,4 @@ namespace ProjectApprovalAPI.Controllers
             }
         }
     }
-
 }

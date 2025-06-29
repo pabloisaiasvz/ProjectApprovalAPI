@@ -2,7 +2,7 @@
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using ProjectApprovalAPI.Exceptions;
+using Domain.Exceptions;
 
 namespace ProjectApprovalAPI.Common
 {
